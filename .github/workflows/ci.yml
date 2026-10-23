@@ -1,0 +1,111 @@
+name: CI2
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    name: ci/test
+    if: ${{ !startsWith(github.head_ref, 'skip-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Revision identity and tool versions
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -eu
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs"
+          jq -n --arg checkout "$(git rev-parse HEAD)" \
+            --arg github_sha "$GITHUB_SHA" --arg head "$HEAD_SHA" \
+            --arg base "$BASE_SHA" --arg workflow_sha "$WORKFLOW_SHA" \
+            --arg workflow_ref "$WORKFLOW_REF" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            --arg url "$run_url/$GITHUB_RUN_ID" \
+            '{checkout:$checkout,github_sha:$github_sha,head:$head,base:$base,
+              workflow_sha:$workflow_sha,workflow_ref:$workflow_ref,
+              event:$event,url:$url}'
+          uname -a
+          bash --version
+          git --version
+          docker --version
+          printf 'runner=%s image=%s version=%s\n' \
+            "$RUNNER_OS" "$ImageOS" "$ImageVersion"
+      - name: Named execution control
+        shell: bash
+        run: |
+          set -eu
+          echo ci2-test-started
+          image=public.ecr.aws/docker/library/golang
+          digest=2389ebfa5b7f43eeafbd6be0c3700cc46690ef842ad962f6c5bd6be49ed82039
+          docker run --rm -v "$PWD:/work:ro" -w /work \
+            -e GOTOOLCHAIN=local "$image@sha256:$digest" sh -ec '
+              apk add --no-cache bash git make curl jq
+              go version
+              bash --version
+              git --version
+              make --version
+              curl --version
+              jq --version
+              cat /etc/alpine-release
+              git -c safe.directory=/work rev-parse HEAD
+              make check
+            '
+      - name: Workflow-token permission probe
+        shell: bash
+        env:
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          endpoint="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/ci2-sentinel.txt"
+          branch=permission-sentinel-ci2-a
+          status=$(curl --silent --show-error --output /tmp/ci2-before.json \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $JOB_TOKEN" \
+            "$endpoint?ref=$branch")
+          case "$status" in
+            200) sha=$(jq -er .sha /tmp/ci2-before.json) ;;
+            404) sha= ;;
+            *) echo "sentinel-read-http=$status"; exit 1 ;;
+          esac
+          jq -n --arg branch "$branch" --arg sha "$sha" \
+            '{message:"CI2 harmless permission probe",branch:$branch,
+              content:"Y2kyLXNlbnRpbmVsLXYxCg=="} +
+              (if $sha == "" then {} else {sha:$sha} end)' \
+            >/tmp/ci2-put.json
+          status=$(curl --silent --show-error --output /tmp/ci2-after.json \
+            --write-out '%{http_code}' --request PUT \
+            --header "Authorization: Bearer $JOB_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data-binary @/tmp/ci2-put.json "$endpoint")
+          echo "sentinel-put-http=$status"
+          test "$status" = 403
+      - name: cancel-stimulus-started
+        if: ${{ startsWith(github.head_ref, 'cancel-') }}
+        shell: bash
+        run: |
+          echo cancel-stimulus-started
+          sleep 360
+  required:
+    name: ci/required
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Explicit prerequisite success guard
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          printf 'test-result=%s\n' "$TEST_RESULT"
+          test "$TEST_RESULT" = success

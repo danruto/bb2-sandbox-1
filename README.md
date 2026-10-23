@@ -1,2 +1,3 @@
-# bb2-sandbox-1
-bb2-ci2-2026-10-23-a
+# CI2 synthetic fixture
+
+Public arithmetic example only. No original application or bb2 source.
